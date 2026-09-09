@@ -20,8 +20,6 @@ archive = { package = "xmip-core-archive", git = "https://github.com/IlleNilsson
 # The connection: the sibling transport technology's Client uploads and gets
 # objects with a bearer token, and its Session is the far end a test binds.
 gcs = { package = "xmip-core-transport-google-cloud-storage", git = "https://github.com/IlleNilsson/xmip-core-transport-google-cloud-storage", branch = "main" }
-# The receipt's checksum is SHA-256 of the bytes.
-sha2 = "0.10"
 
 [lints.rust]
 unsafe_code = "forbid"

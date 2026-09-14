@@ -4,8 +4,9 @@
 //! retained item as one object in a bucket, its metadata as a second object
 //! beside it, and restores the item by getting both back.
 //!
-//! The metadata text, the timestamp, the layout and the checksum come
-//! from the archive capability (ADR-0044); only the dialect is this crate's.
+//! The metadata text, the timestamp, the layout, the checksum and the
+//! receipt parser come from the archive capability (ADR-0044); only the
+//! dialect is this crate's.
 //!
 //! A xmip-core-archive **technology** (repository-model.md): it depends on
 //! the archive capability for the [`ArchiveStore`] trait and its item,
@@ -14,7 +15,7 @@
 //! call. Obtaining the token is outside this crate, as it is outside the
 //! transport's: the archive is configured with one. The same four fields
 //! every archive technology carries — `data_type`, `identifier`, `bytes`,
-//! `metadata` — are laid out as `object.rs` says: the bytes at
+//! `metadata` — are laid out as `archive::layout` says: the bytes at
 //! `<prefix>/<data_type>/<identifier>`, the metadata text at the same name
 //! with `.meta` appended.
 //!
@@ -26,7 +27,7 @@
 use std::time::Duration;
 
 use archive::{ArchiveError, ArchiveItem, ArchiveReceipt, ArchiveStore};
-use archive::{checksum, layout, metadata};
+use archive::{checksum, layout, location, metadata};
 use gcs::Client;
 
 /// An archive that keeps items as objects under one prefix of one bucket.
@@ -72,7 +73,7 @@ impl GcsArchive {
     }
 
     fn client(&self) -> Result<Client, ArchiveError> {
-        let client = Client::new(&self.endpoint, &self.token).map_err(error)?;
+        let client = Client::new(&self.endpoint, &self.token).map_err(ArchiveError::caused_by)?;
         Ok(match self.timeout {
             Some(timeout) => client.timing_out_after(timeout),
             None => client,
@@ -87,10 +88,10 @@ impl ArchiveStore for GcsArchive {
         let client = self.client()?;
         client
             .put(&self.bucket, &name, &item.bytes)
-            .map_err(error)?;
+            .map_err(ArchiveError::caused_by)?;
         client
             .put(&self.bucket, &layout::meta_key(&name), metadata.as_bytes())
-            .map_err(error)?;
+            .map_err(ArchiveError::caused_by)?;
         Ok(ArchiveReceipt {
             location: format!("gcs://{}/{name}", self.bucket),
             checksum: Some(checksum::sha256_hex(&item.bytes)),
@@ -98,7 +99,7 @@ impl ArchiveStore for GcsArchive {
     }
 
     fn restore(&self, receipt: &ArchiveReceipt) -> Result<ArchiveItem, ArchiveError> {
-        let (bucket, name) = parse_location(&receipt.location)?;
+        let (bucket, name) = location::bucket_key("gcs", &receipt.location)?;
         let (data_type, identifier) =
             layout::split_key(&self.prefix, name).ok_or_else(|| ArchiveError {
                 message: format!(
@@ -107,7 +108,7 @@ impl ArchiveStore for GcsArchive {
                 ),
             })?;
         let client = self.client()?;
-        let bytes = client.get(bucket, name).map_err(error)?;
+        let bytes = client.get(bucket, name).map_err(ArchiveError::caused_by)?;
         if let Some(expected) = &receipt.checksum {
             let actual = checksum::sha256_hex(&bytes);
             if &actual != expected {
@@ -119,8 +120,10 @@ impl ArchiveStore for GcsArchive {
                 });
             }
         }
-        let metadata = client.get(bucket, &layout::meta_key(name)).map_err(error)?;
-        let metadata = String::from_utf8(metadata).map_err(error)?;
+        let metadata = client
+            .get(bucket, &layout::meta_key(name))
+            .map_err(ArchiveError::caused_by)?;
+        let metadata = String::from_utf8(metadata).map_err(ArchiveError::caused_by)?;
         Ok(ArchiveItem {
             data_type,
             identifier,
@@ -130,42 +133,13 @@ impl ArchiveStore for GcsArchive {
     }
 }
 
-/// The bucket and object a receipt names: `gcs://<bucket>/<object>`.
-fn parse_location(location: &str) -> Result<(&str, &str), ArchiveError> {
-    location
-        .strip_prefix("gcs://")
-        .and_then(|rest| rest.split_once('/'))
-        .filter(|(bucket, name)| !bucket.is_empty() && !name.is_empty())
-        .ok_or_else(|| ArchiveError {
-            message: format!("{location} is not gcs://bucket/object"),
-        })
-}
-
-fn error(cause: impl std::fmt::Display) -> ArchiveError {
-    ArchiveError {
-        message: cause.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use archive::fixture::{item, secs};
     use gcs::{Event, Session};
     use std::net::TcpListener;
     use std::thread::JoinHandle;
-
-    fn secs(n: u64) -> Duration {
-        Duration::from_secs(n)
-    }
-
-    fn item(id: &str) -> ArchiveItem {
-        ArchiveItem {
-            data_type: "json".to_string(),
-            identifier: id.to_string(),
-            bytes: b"{\"kept\":true}".to_vec(),
-            metadata: vec![("source".to_string(), "playground".to_string())],
-        }
-    }
 
     /// A far end that answers `requests` bearing the token, one connection
     /// each, and then hands back what it holds and what it saw.
